@@ -195,9 +195,6 @@ export default function PreviewPage() {
       <AdditionalSections sections={view.additionalSections} />
       <NextActions items={view.nextActions} />
       {view.show.kpiStrip && <KpiStrip kpis={view.kpiStrip} />}
-      <footer className="mt-12 border-t border-slate-200 pt-4 text-center text-xs text-slate-400">
-        本レポートはInstagram公式APIのデータに基づき自動生成されています
-      </footer>
     </main>
   );
 }
