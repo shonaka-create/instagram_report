@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "instagram-report": {
+      "command": "node",
+      "args": [
+        "C:\\Users\\shota\\Yournist Dropbox\\YOURNIST YOURNIST\\Instagram_report\\mcp-server\\dist\\index.js"
+      ]
+    }
+  }
+}
