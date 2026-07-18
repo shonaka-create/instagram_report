@@ -1,0 +1,8 @@
+{
+  "sample": {
+    "name": "株式会社サンプル",
+    "igUserId": "17841400000000000",
+    "igAccessToken": "EAAG...(長期アクセストークン)",
+    "spreadsheetId": "1AbCdEfGhIjKlMnOpQrStUvWxYz(スプレッドシートURLの/d/と/editの間)"
+  }
+}

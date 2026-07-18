@@ -1,5 +1,7 @@
 node_modules/
 .next/
+mcp-server/dist/
+mcp-server/clients.json
 out/
 .env
 .env.local
