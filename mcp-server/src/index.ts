@@ -124,7 +124,21 @@ async function fetchInsights(cfg: ClientConfig, period: string) {
 
   // 投稿ごとのインサイト(リーチ・保存数・閲覧数)。
   // メディア種別によって使えないメトリクスがあるため、失敗しても投稿自体は返す
-  const posts = [];
+  type PostRow = {
+    id: string;
+    date?: string;
+    type?: string;
+    permalink?: string;
+    caption: string;
+    likes: number;
+    comments: number;
+    reach: number | null;
+    saved: number | null;
+    views: number | null;
+    engagement: number;
+    viewsPerReach: number | null;
+  };
+  const posts: PostRow[] = [];
   for (const m of media) {
     let insights: Record<string, number> = {};
     try {
@@ -142,31 +156,92 @@ async function fetchInsights(cfg: ClientConfig, period: string) {
     } catch {
       insights = {}; // このメディア種別では取得不可
     }
-    // AIが分析しやすいよう、不要なメタデータを削った軽量JSONに整形
+    // AIが分析しやすいよう、不要なメタデータを削った軽量JSONに整形。
+    // 比率はここで計算して渡す(分析モデル側の計算ミスを構造的に排除するため)
+    const likes = m.like_count ?? 0;
+    const comments = m.comments_count ?? 0;
+    const reach = insights.reach ?? null;
+    const views = insights.views ?? null;
     posts.push({
       id: m.id,
       date: m.timestamp?.slice(0, 10),
       type: m.media_type,
       permalink: m.permalink,
       caption: (m.caption ?? "").slice(0, 120),
-      likes: m.like_count ?? 0,
-      comments: m.comments_count ?? 0,
-      reach: insights.reach ?? null,
+      likes,
+      comments,
+      reach,
       saved: insights.saved ?? null,
-      views: insights.views ?? null,
+      views,
+      engagement: likes + comments,
+      viewsPerReach:
+        reach && views !== null ? Math.round((views / reach) * 10) / 10 : null,
     });
   }
+
+  // --- 集計・比率・警告フラグ(すべてサーバー側で計算済み。再計算不要) ---
+  const followers = Number(profile.followers_count ?? 0);
+  const sum = (k: "likes" | "comments") =>
+    posts.reduce((a, p) => a + (p[k] ?? 0), 0);
+  const sumNullable = (k: "reach" | "views" | "saved") =>
+    posts.reduce((a, p) => a + (p[k] ?? 0), 0);
+  const totalReach = sumNullable("reach");
+  const derived = {
+    totals: {
+      reach: totalReach,
+      views: sumNullable("views"),
+      saved: sumNullable("saved"),
+      likes: sum("likes"),
+      comments: sum("comments"),
+      engagement: sum("likes") + sum("comments"),
+    },
+    reachToFollowerPct:
+      followers > 0 ? Math.round((totalReach / followers) * 1000) / 10 : null,
+  };
+
+  const flags: string[] = [];
+  const byDate = new Map<string, number>();
+  for (const p of posts) {
+    if (p.date) byDate.set(p.date, (byDate.get(p.date) ?? 0) + 1);
+  }
+  for (const [date, n] of byDate) {
+    if (n >= 2)
+      flags.push(
+        `${date} に${n}本を同日投稿(アルゴリズムの初速テストが分散し、後発の投稿が配信されにくくなる)`
+      );
+  }
+  if (posts.length > 0 && derived.totals.saved === 0)
+    flags.push(
+      "全投稿で保存0(保存はアルゴリズムが最重視するシグナル。発見タブ露出の起点が欠けている)"
+    );
+  if (derived.reachToFollowerPct !== null && derived.reachToFollowerPct < 50)
+    flags.push(
+      `合計リーチがフォロワー数の${derived.reachToFollowerPct}%に留まる(既存フォロワーにも届き切っていない)`
+    );
 
   return {
     client: cfg.name,
     period,
     account: {
       username: profile.username,
-      followers: profile.followers_count,
+      followers,
       totalMedia: profile.media_count,
     },
     postCount: posts.length,
     posts,
+    derived,
+    flags,
+    // どのモデル・どの画面で分析しても必ず目に入るよう、指針をデータに同梱する
+    analysisGuidelines: [
+      "このデータを分析してレポートを書く際の必須ルール(SNS戦略コンサルタントとして):",
+      "1) 数値の再計算をしない。posts/derived の計算済みの値(viewsPerReach 等)をそのまま使う",
+      "2) 数値の読み上げは禁止。必ず『なぜ起きたか』を閲覧者心理(自己開示への返報性、保存の動機、単純接触効果など)とアルゴリズム(初速シグナル、滞在時間、保存・シェアの重み、フィード=フォロワー内配信/リール=非フォロワー配信という構造差)で説明する",
+      "3) ファネル(認知=リーチ → 興味=閲覧・滞在 → 信頼=プロフィール訪問・フォロー → 行動=保存・問い合わせ)のどこが詰まっているかを特定して述べる",
+      "4) flags の警告は必ずレポートに反映する",
+      "5) nextActions は『やめること』と『制作リソースをどこに寄せるか』という配分の言葉で書く(抽象論禁止)",
+      "6) 各topPostの insight は 観察→因果(心理/アルゴリズム)→次の一手 の3要素で書く",
+      "7) クライアント提出用の丁寧語で、歯切れよく断定する",
+    ].join("\n"),
   };
 }
 
