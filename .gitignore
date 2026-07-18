@@ -9,3 +9,7 @@ out/
 next-env.d.ts
 *.tsbuildinfo
 .vercel
+
+# ローカルのパスワード/トークン控え(コミット厳禁)
+memo
+vtoken

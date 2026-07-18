@@ -235,8 +235,9 @@ export async function fetchRawInsights(
   }
 
   // --- アカウント単位インサイト(取得不可でも投稿分析は成立させる) ---
+  // period=day は total_value メトリクスでも必須(欠けると "period is required" で全滅する)。
   const notes: string[] = [];
-  const range = { since: String(since), until: String(until) };
+  const range = { period: "day", since: String(since), until: String(until) };
 
   let profileViews: number | null = null;
   try {
@@ -246,6 +247,8 @@ export async function fetchRawInsights(
       accessToken
     );
     profileViews = totalValueOf(res);
+    if (profileViews === null)
+      notes.push("profile_views が空でした(プロフィール遷移率は測定不可)");
   } catch {
     notes.push("profile_views を取得できませんでした(プロフィール遷移率は測定不可)");
   }
@@ -266,6 +269,8 @@ export async function fetchRawInsights(
     const b = breakdownByFollowType(res);
     followerReach = b.follower;
     nonFollowerReach = b.nonFollower;
+    if (followerReach === null && nonFollowerReach === null)
+      notes.push("フォロワー種別リーチが空でした(ホーム率は測定不可)");
   } catch {
     notes.push("フォロワー種別リーチを取得できませんでした(ホーム率は測定不可)");
   }
@@ -282,6 +287,10 @@ export async function fetchRawInsights(
       accessToken
     );
     netNewFollows = totalValueOf(res);
+    if (netNewFollows === null)
+      notes.push(
+        "純増フォロワー(follows_and_unfollows)が空でした(フォロワー転換率は測定不可)"
+      );
   } catch {
     notes.push(
       "純増フォロワー(follows_and_unfollows)を取得できませんでした(フォロワー転換率は測定不可)"
