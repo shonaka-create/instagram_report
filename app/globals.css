@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+/* 印刷 = PDF保存(ブラウザのPDF出力がそのまま納品品質になるよう調整) */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  .page-break {
+    break-before: page;
+  }
+  body {
+    background: white !important;
+  }
+}
+
+@page {
+  size: A4;
+  margin: 12mm;
+}
