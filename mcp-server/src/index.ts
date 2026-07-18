@@ -28,8 +28,8 @@ import "dotenv/config";
 
 type ClientConfig = {
   name: string;
-  igUserId: string;
-  igAccessToken: string;
+  igAccessToken: string; // Instagramログイン版APIの長期トークン(60日)
+  igUserId?: string; // 旧Graph API用。新方式では不要
 };
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -58,10 +58,12 @@ function getClient(clientId: string): ClientConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Instagram Graph API
+// Instagram API (Instagramログイン方式)
+// Facebookページ連携が不要な新方式。エンドポイントは graph.instagram.com、
+// トークンはMetaアプリ管理画面の「Instagram > APIセットアップ」で直接発行する。
 // ---------------------------------------------------------------------------
 
-const GRAPH_BASE = "https://graph.facebook.com/v21.0";
+const GRAPH_BASE = "https://graph.instagram.com/v21.0";
 
 async function igGet(
   pathname: string,
@@ -91,23 +93,24 @@ type MediaRow = {
 };
 
 async function fetchInsights(cfg: ClientConfig, period: string) {
-  if (!cfg.igUserId || !cfg.igAccessToken) {
+  if (!cfg.igAccessToken) {
     throw new Error(
-      `このクライアントの igUserId / igAccessToken が clients.json に未設定です`
+      `このクライアントの igAccessToken が clients.json に未設定です`
     );
   }
   const [year, month] = period.split("-").map(Number);
   const since = Math.floor(Date.UTC(year, month - 1, 1) / 1000);
   const until = Math.floor(Date.UTC(year, month, 1) / 1000);
 
+  // "me" = トークンに紐づくInstagramアカウント自身(IDの事前特定が不要)
   const profile = await igGet(
-    cfg.igUserId,
-    { fields: "followers_count,media_count,username" },
+    "me",
+    { fields: "username,followers_count,media_count" },
     cfg.igAccessToken
   );
 
   const mediaRes = await igGet(
-    `${cfg.igUserId}/media`,
+    "me/media",
     {
       fields:
         "id,caption,media_type,permalink,like_count,comments_count,timestamp",
