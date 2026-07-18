@@ -1,85 +1,93 @@
-# Instagram 月次レポート自動生成システム
+# Instagram 月次レポートシステム
 
-Instagram Graph API からデータを取得し、Claude が分析した JSON をもとに、クライアント納品用の月次レポート(HTML / PDF)を自動生成・配信するシステム。
+Instagram API からデータを取得し、コンサルタント品質の月次レポート(HTML / PDF)を発行するシステム。
+
+**レポートの価値設計**: アプリを見ればわかる数値の羅列ではなく、ファネル4指標(保存率 2.0% / ホーム率 30% / プロフィール遷移率 2.0% / フォロワー転換率 10%)の**合格ラインに対する診断**と、**ボトルネック特定→来月の具体アクション**が主役。
 
 ## アーキテクチャ
 
 ```
-[Vercel Cron (毎月1日 10:00 JST)]
-   │ /api/cron/monthly … クライアント毎に reports 行を作成し QStash へ投入
+[Vercel Cron 毎月1日 10:00 JST]
+   /api/cron/monthly … 全アクティブクライアントの前月データを取得し
+                       指標を計算して保存 (status: fetched)。分析はしない
    ▼
-[QStash] → /api/jobs/fetch-insights   Instagram Graph API → raw_insights 保存
-        → /api/jobs/analyze           Claude (Structured Outputs) → report_json 保存
-        → /api/jobs/publish-report    公開 (access_token 付きURL確定)
-        → /api/jobs/render-pdf        (wants_pdf のクライアントのみ) PDF生成 → Storage
+[月初: Claude Code で /instagram-monthly-report スキルを実行]
+   MCP get_instagram_insights … 保存済みデータ+計算済み指標+分析指針を返す
+   → Claude が「文章のみ」の分析を書く(数値は一切書かない)
+   → MCP publish_report … サーバー保存済みの数値と文章をマージして公開
+   ▼
+[閲覧] /reports (一覧・フィルタ) → /reports/{access_token} (レポート本体)
+       サイト全体を SITE_PASSWORD で保護。PDFはブラウザ印刷(print CSS完備)
 ```
 
-- **レポートの正本は DB の `report_json`(Claudeの出力)。** HTML は `/reports/{access_token}` で都度レンダリングするため、テンプレート改善が過去レポートにも反映される
-- **PDF は基本「ブラウザの印刷機能」で賄う**(print CSS 完備、無料)。ファイル納品が必要なクライアントだけ `wants_pdf=true` にするとサーバー側で Puppeteer + `@sparticuz/chromium-min` により生成し、署名付きURLで配布
-- **冪等性**: `reports.status` を状態機械として使い、各ジョブ冒頭の条件付き UPDATE で QStash の重複配送を無害化。恒久エラーは 200 + `failed` 記録、一時エラーは 500 でリトライ
+### 数値安全設計(どのモデルで分析しても数値が壊れない)
+
+1. **取得・計算の単一実装**: `mcp-server/src/insights.ts` を Vercel cron と MCP の両方が import する。経路によって数値が食い違うことがない
+2. **数値と文章の分離**: レポート正本 `report_json` は `{ metrics(サーバー計算), analysis(モデルの文章) }`。モデルは数値を出力せず、publish 時にサーバーがマージする
+3. **比率は分子分母の母集団を統一**(保存率=投稿合算÷投稿合算、プロフ遷移率=アカウント重複排除リーチ基準)。取得不可の指標は `unknown` として「測定不可」表示
+4. **top/worst投稿の選定・前月比・ベンチマーク判定もすべてサーバー側**で決定的に計算
 
 ## セットアップ
 
 ### 1. Supabase
 
-1. SQL Editor で `supabase/migrations/0001_init.sql` を実行(テーブル + `reports`/`bin` バケット作成)
-2. Project Settings → API から URL と `service_role` キーを控える
+SQL Editor で `supabase/migrations/` の 0001〜0003 を順に実行。
 
-### 2. Upstash QStash
+### 2. 環境変数
 
-[Upstash Console](https://console.upstash.com/qstash) で Token / Signing Keys を取得。無料枠(500メッセージ/日)で十分。
+`.env.example` をコピーして `.env.local` を作成。Vercel にも同じ4つ+`SITE_PASSWORD` を設定:
+`APP_URL` / `SITE_PASSWORD` / `CRON_SECRET` / `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`
 
-### 3. 環境変数
+### 3. MCPサーバー
 
-`.env.example` をコピーして `.env.local` を作成し、各値を設定。Vercel にも同じものを設定する。
+```sh
+cd mcp-server && npm install && npm run build
+```
+
+`mcp-server/.env` に `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` / `APP_URL` を設定。
+プロジェクトの `.mcp.json` で Claude Code に登録済み。
 
 ### 4. クライアント登録
 
-```sql
-insert into clients (name, ig_user_id, ig_access_token, brand_color, wants_pdf)
-values ('株式会社サンプル', '17841400000000000', 'EAAG...', '#0f766e', false);
-```
+Claude Code で `/instagram-monthly-report` を起動し「クライアント追加」と言う
+(テスター招待→承認→トークン発行→ `upsert_client` まで案内される)。
 
-`ig_access_token` は Instagram Graph API の**長期トークン(60日有効)**。失効するとジョブが `failed` になるため、定期的なローテーションが必要。
-
-### 5. (任意) サーバーPDF生成
-
-`wants_pdf=true` のクライアントを使う場合のみ:
-
-1. [Sparticuz/chromium releases](https://github.com/Sparticuz/chromium/releases) から `chromium-vXXX-pack.x64.tar` をダウンロード
-   (`@sparticuz/chromium-min` のバージョンと**メジャーバージョンを一致**させること)
-2. Supabase Storage の `bin` バケット(public)にアップロード
-3. その公開URLを `CHROMIUM_PACK_URL` に設定
-
-### 6. デプロイ
-
-Vercel にデプロイ。`vercel.json` の Cron(毎月1日 01:00 UTC = 10:00 JST)が自動実行される。
-
-手動実行(動作確認):
+### 5. Vercel デプロイ
 
 ```sh
-curl -H "Authorization: Bearer $CRON_SECRET" https://your-app.vercel.app/api/cron/monthly
+npx vercel link   # shonaka-creates-projects のプロジェクトに紐付け
+npx vercel env add SITE_PASSWORD  # ほか上記の環境変数を追加
+npx vercel --prod
 ```
 
-## 運用
+`vercel.json` の Cron(毎月1日 01:00 UTC = 10:00 JST)が自動実行される。手動確認:
 
-- 進捗・失敗は `reports` テーブルの `status` / `error_message` で確認
-- `failed` の行は原因(トークン失効など)を解消後、`status='queued'` に戻して Cron を手動実行すれば再走する
-- クライアントへは `https://<APP_URL>/reports/{access_token}` を送付(access_token は reports 行に自動発行)
+```sh
+curl -H "Authorization: Bearer $CRON_SECRET" https://<APP_URL>/api/cron/monthly
+```
+
+## 運用(月次)
+
+1. 毎月1日: cron が自動で前月データを取得(放置でOK)
+2. 月初: Claude Code で `/instagram-monthly-report` → 棚卸→分析→公開まで一連実行
+3. 発行された `/reports/{token}` のURLをクライアントに送付(パスワードも共有)
+4. IGトークンは**60日で失効**。スキルの棚卸フローが45日超で警告する
+
+- 進捗・失敗は `/reports` 一覧、または `reports` テーブルの `status` / `error_message`
+- クライアント別の観点調整は `upsert_client` の `modulesAdd`(reels/timing/cta/trend) / `modulesRemove`(worst_posts/content_insight/kpi_strip) / `moduleNote`(自由記述)
 
 ## コスト
 
 | サービス | 費用 |
 |---|---|
-| Instagram Graph API | 無料(レート制限のみ) |
-| Claude API (claude-sonnet-5) | 従量課金: $3/1M入力・$15/1M出力(2026-08-31まで $2/$10)。1レポートあたり概算 $0.03〜0.1 |
-| Supabase | Freeプラン内(DB 500MB / Storage 1GB) |
-| Upstash QStash | Freeプラン内(500msg/日) |
+| Instagram API | 無料(レート制限のみ) |
+| 分析 | Claude Code サブスク内(MCP経由、API課金なし) |
+| Supabase | Freeプラン内 |
 | Vercel | Hobbyは無料だが**商用利用は規約上Pro($20/月)が必要** |
 
 ## 主な技術判断
 
-- **`@react-pdf/renderer` 不採用**: 日本語フォント埋め込み・組版が弱く、HTML版とデザイン二重管理になるため
-- **Puppeteer の 50MB 制限回避**: `@sparticuz/chromium-min` を使い、Chromium 本体はバンドルせず Supabase Storage から実行時取得
-- **日本語フォント**: `next/font/google` の Noto Sans JP に一本化。PDF もレポートページを印刷する方式なので文字化けが構造的に起きない
-- **Claude の JSON 品質**: Structured Outputs(`output_config.format` + zod スキーマ)で API レベルにスキーマ準拠を保証。パース失敗リトライは不要
+- **PDFはブラウザ印刷で賄う**(print CSS完備・Chromium品質・無料)。一覧の「PDF」リンクは `?print=1` で印刷ダイアログを自動起動
+- **日本語フォント**: `next/font/google` の Noto Sans JP。PDFも同ページ印刷なので文字化けが構造的に起きない
+- **HTML都度レンダリング**: 正本はDBのJSONなので、テンプレート改善が過去レポートにも即反映
+- **旧QStash/Claude APIパイプラインは廃止**(2026-07)。分析はMCP経由でサブスク内実行

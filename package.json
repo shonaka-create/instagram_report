@@ -8,12 +8,8 @@
     "start": "next start"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.112.3",
-    "@sparticuz/chromium-min": "^149.0.0",
     "@supabase/supabase-js": "^2.110.7",
-    "@upstash/qstash": "^2.11.2",
     "next": "^16.2.10",
-    "puppeteer-core": "^25.3.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "zod": "^4.4.3"

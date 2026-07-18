@@ -1,43 +1,174 @@
 import { z } from "zod";
 
-// Claude の Structured Outputs (output_config.format) に渡すスキーマ。
-// API 側でこの形が保証されるため、受信後の再検証・リトライは不要。
-export const ReportSchema = z.object({
-  period: z.string().describe('レポート対象月。"YYYY-MM" 形式'),
-  summary: z
-    .string()
-    .describe(
-      "当月の総評。定量データに基づく定性分析を300〜400字で。クライアントに提出する文章なので丁寧語で書く"
-    ),
-  kpis: z
-    .array(
-      z.object({
-        label: z.string().describe("KPI名(例: リーチ数、フォロワー数)"),
-        value: z.number().describe("当月の値"),
-        momChangePct: z
-          .number()
-          .nullable()
-          .describe("前月比の変化率(%)。前月データがなければ null"),
-      })
-    )
-    .describe("主要KPI。4〜6項目"),
-  topPosts: z
-    .array(
-      z.object({
-        mediaId: z.string().describe("InstagramのメディアID"),
-        permalink: z.string().describe("投稿のパーマリンクURL"),
-        caption: z.string().describe("キャプションの冒頭50字程度"),
-        likeCount: z.number(),
-        commentsCount: z.number(),
-        insight: z
-          .string()
-          .describe("この投稿がなぜ伸びたか(または伸びなかったか)の分析。100字程度"),
-      })
-    )
-    .describe("エンゲージメント上位の投稿。最大3件"),
-  nextActions: z
-    .array(z.string())
-    .describe("翌月に向けた具体的な改善アクション。3〜5個"),
+// ---------------------------------------------------------------------------
+// レポートの正本 report_json = { schemaVersion: 2, metrics, analysis }
+//
+//  - metrics: サーバー計算の数値ブロック(mcp-server/src/insights.ts が唯一の計算元)
+//  - analysis: 分析モデルが書いた文章ブロック(数値を含まない)
+//
+// 数値と文章を分離することで、どのモデル(Sonnet等)が分析しても
+// レポート上の数値が壊れることは構造的に起きない。
+// 型は mcp-server/src/insights.ts / index.ts と同期すること。
+// ---------------------------------------------------------------------------
+
+const funnelKey = z.enum([
+  "save_rate",
+  "home_rate",
+  "profile_transition_rate",
+  "follower_conversion_rate",
+]);
+
+const postMetric = z.object({
+  id: z.string(),
+  date: z.string().nullable(),
+  type: z.string().nullable(),
+  permalink: z.string().nullable(),
+  caption: z.string(),
+  likes: z.number(),
+  comments: z.number(),
+  reach: z.number().nullable(),
+  saved: z.number().nullable(),
+  views: z.number().nullable(),
+  engagement: z.number(),
+  viewsPerReach: z.number().nullable(),
+  saveRate: z.number().nullable(),
 });
 
+export const MetricsSchema = z.object({
+  schemaVersion: z.literal(2),
+  period: z.string(),
+  account: z.object({
+    username: z.string().nullable(),
+    followers: z.number(),
+    postCount: z.number(),
+  }),
+  posts: z.array(postMetric),
+  funnel: z.object({
+    stages: z.array(
+      z.object({
+        key: funnelKey,
+        label: z.string(),
+        value: z.number().nullable(),
+        benchmark: z.number(),
+        gapPt: z.number().nullable(),
+        verdict: z.enum(["pass", "warn", "fail", "unknown"]),
+      })
+    ),
+    raw: z.record(z.string(), z.number().nullable()),
+    dataNotes: z.array(z.string()),
+  }),
+  topPosts: z.array(postMetric),
+  worstPosts: z.array(postMetric),
+  kpiStrip: z.array(
+    z.object({
+      key: z.string(),
+      label: z.string(),
+      value: z.number(),
+      momChangePct: z.number().nullable(),
+    })
+  ),
+  flags: z.array(z.string()),
+  sections: z.object({
+    addModules: z.array(z.string()),
+    removed: z.array(z.string()),
+    note: z.string().nullable(),
+  }),
+});
+
+export const AnalysisSchema = z.object({
+  headline: z.string(),
+  executiveSummary: z.string(),
+  stageDiagnoses: z.object({
+    save_rate: z.string(),
+    home_rate: z.string(),
+    profile_transition_rate: z.string(),
+    follower_conversion_rate: z.string(),
+  }),
+  bottleneck: z.string(),
+  contentInsight: z
+    .object({ winPattern: z.string(), losePattern: z.string() })
+    .nullish(),
+  postInsights: z.array(z.object({ mediaId: z.string(), insight: z.string() })),
+  nextActions: z.array(
+    z.object({
+      action: z.string(),
+      why: z.string(),
+      priority: z.enum(["high", "mid"]),
+    })
+  ),
+  additionalSections: z
+    .array(
+      z.object({ moduleKey: z.string(), title: z.string(), body: z.string() })
+    )
+    .nullish(),
+});
+
+export const ReportSchema = z.object({
+  schemaVersion: z.literal(2),
+  metrics: MetricsSchema,
+  analysis: AnalysisSchema,
+});
+
+export type Metrics = z.infer<typeof MetricsSchema>;
+export type Analysis = z.infer<typeof AnalysisSchema>;
 export type Report = z.infer<typeof ReportSchema>;
+
+// ---------------------------------------------------------------------------
+// レンダリング用ビューモデル: 数値(metrics)と文章(analysis)をここで合流させる
+// ---------------------------------------------------------------------------
+
+export type StageView = Metrics["funnel"]["stages"][number] & {
+  diagnosis: string;
+};
+export type PostView = z.infer<typeof postMetric> & { insight: string };
+
+export type ReportView = {
+  period: string;
+  headline: string;
+  executiveSummary: string;
+  stages: StageView[];
+  bottleneck: string;
+  dataNotes: string[];
+  contentInsight: { winPattern: string; losePattern: string } | null;
+  topPosts: PostView[];
+  worstPosts: PostView[];
+  nextActions: Analysis["nextActions"];
+  additionalSections: NonNullable<Analysis["additionalSections"]>;
+  kpiStrip: Metrics["kpiStrip"];
+  show: { worstPosts: boolean; contentInsight: boolean; kpiStrip: boolean };
+};
+
+export function toReportView(report: Report): ReportView {
+  const { metrics, analysis } = report;
+  const insightById = new Map(
+    analysis.postInsights.map((p) => [p.mediaId, p.insight])
+  );
+  const attach = (posts: Metrics["topPosts"]): PostView[] =>
+    posts.map((p) => ({ ...p, insight: insightById.get(p.id) ?? "" }));
+
+  const removed = new Set(metrics.sections.removed);
+  return {
+    period: metrics.period,
+    headline: analysis.headline,
+    executiveSummary: analysis.executiveSummary,
+    stages: metrics.funnel.stages.map((s) => ({
+      ...s,
+      diagnosis: analysis.stageDiagnoses[s.key],
+    })),
+    bottleneck: analysis.bottleneck,
+    dataNotes: metrics.funnel.dataNotes,
+    contentInsight: removed.has("content_insight")
+      ? null
+      : (analysis.contentInsight ?? null),
+    topPosts: attach(metrics.topPosts),
+    worstPosts: removed.has("worst_posts") ? [] : attach(metrics.worstPosts),
+    nextActions: analysis.nextActions,
+    additionalSections: analysis.additionalSections ?? [],
+    kpiStrip: metrics.kpiStrip,
+    show: {
+      worstPosts: !removed.has("worst_posts"),
+      contentInsight: !removed.has("content_insight"),
+      kpiStrip: !removed.has("kpi_strip"),
+    },
+  };
+}
