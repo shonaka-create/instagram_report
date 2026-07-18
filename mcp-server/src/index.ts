@@ -3,8 +3,12 @@
  * Instagram運用代行 MCPサーバー
  *
  * Claude Desktop / claude.ai から Tools として呼び出される:
- *  - get_instagram_insights: Graph APIからデータ取得 → 軽量JSONで返却(社内分析用)
- *  - export_report:          Claudeが作った分析結果をGoogleスプレッドシートへ転記(納品用)
+ *  - get_instagram_insights: Graph APIからデータ取得 → 軽量JSONで返却(分析用)
+ *  - publish_report:         Claudeが作ったレポートJSONをSupabaseに保存し、
+ *                            専用URL(HTMLレポート/PDF)を発行(納品用)
+ *
+ * 出力は Vercel パイプラインと同じ /reports/{token} に統一されるため、
+ * MCPで分析しても自動バッチで生成しても、クライアントに渡すURLは同じ形式になる。
  *
  * 注意: stdioトランスポートではstdoutがプロトコル通信路なので、
  * ログは必ず console.error (stderr) に出すこと。
@@ -12,8 +16,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { JWT } from "google-auth-library";
-import { GoogleSpreadsheet } from "google-spreadsheet";
+import { createClient } from "@supabase/supabase-js";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,7 +30,6 @@ type ClientConfig = {
   name: string;
   igUserId: string;
   igAccessToken: string;
-  spreadsheetId?: string; // export_report を使うクライアントのみ
 };
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -89,6 +91,11 @@ type MediaRow = {
 };
 
 async function fetchInsights(cfg: ClientConfig, period: string) {
+  if (!cfg.igUserId || !cfg.igAccessToken) {
+    throw new Error(
+      `このクライアントの igUserId / igAccessToken が clients.json に未設定です`
+    );
+  }
   const [year, month] = period.split("-").map(Number);
   const since = Math.floor(Date.UTC(year, month - 1, 1) / 1000);
   const until = Math.floor(Date.UTC(year, month, 1) / 1000);
@@ -161,73 +168,107 @@ async function fetchInsights(cfg: ClientConfig, period: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Google Sheets 転記
+// レポート公開 (Supabase → 専用URLのHTMLレポート)
 // ---------------------------------------------------------------------------
 
-const SHEET_HEADERS = [
-  "date",
-  "period",
-  "client",
-  "summary",
-  "next_action",
-  "kpi_json",
-];
+// Next.js側 lib/report-schema.ts と同じ構造(こちらはzod v3)
+const ReportSchema = z.object({
+  period: z.string().describe('レポート対象月 "YYYY-MM"'),
+  summary: z.string().describe("当月の総評(300〜400字、丁寧語)"),
+  kpis: z
+    .array(
+      z.object({
+        label: z.string().describe("KPI名(例: リーチ数)"),
+        value: z.number(),
+        momChangePct: z
+          .number()
+          .nullable()
+          .describe("前月比%。前月データがなければ null"),
+      })
+    )
+    .describe("主要KPI 4〜6項目"),
+  topPosts: z
+    .array(
+      z.object({
+        mediaId: z.string(),
+        permalink: z.string(),
+        caption: z.string().describe("キャプション冒頭50字程度"),
+        likeCount: z.number(),
+        commentsCount: z.number(),
+        insight: z.string().describe("伸びた/伸びなかった理由の分析 100字程度"),
+      })
+    )
+    .describe("人気投稿 最大3件"),
+  nextActions: z.array(z.string()).describe("翌月の改善アクション 3〜5個"),
+});
 
-async function appendReportRow(
+function supabaseAdmin() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) {
+    throw new Error(
+      "SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY が未設定です (mcp-server/.env)"
+    );
+  }
+  return createClient(url, key, { auth: { persistSession: false } });
+}
+
+async function publishReport(
   cfg: ClientConfig,
-  args: {
-    period?: string;
-    summaryText: string;
-    nextAction: string;
-    kpiData: Record<string, string | number>;
-  }
-) {
-  if (!cfg.spreadsheetId) {
-    throw new Error(
-      `このクライアントには spreadsheetId が設定されていません (clients.json)`
-    );
-  }
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const key = (process.env.GOOGLE_PRIVATE_KEY ?? "").replace(/\\n/g, "\n");
-  if (!email || !key) {
-    throw new Error(
-      "GOOGLE_SERVICE_ACCOUNT_EMAIL / GOOGLE_PRIVATE_KEY が未設定です (.env)"
-    );
-  }
+  period: string,
+  report: z.infer<typeof ReportSchema>
+): Promise<string> {
+  const db = supabaseAdmin();
 
-  const jwt = new JWT({
-    email,
-    key,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-  });
-  const doc = new GoogleSpreadsheet(cfg.spreadsheetId, jwt);
-  await doc.loadInfo();
+  // clientsテーブルの行を名前で解決(なければ作成)
+  const { data: existing, error: selErr } = await db
+    .from("clients")
+    .select("id")
+    .eq("name", cfg.name)
+    .maybeSingle();
+  if (selErr) throw new Error(`clients検索エラー: ${selErr.message}`);
 
-  const sheet = doc.sheetsByTitle["reports"] ?? doc.sheetsByIndex[0];
-  // 空シートだとaddRowが失敗するため、ヘッダー行がなければ作る
-  try {
-    await sheet.loadHeaderRow();
-  } catch {
-    await sheet.setHeaderRow(SHEET_HEADERS);
+  let clientId = existing?.id as string | undefined;
+  if (!clientId) {
+    const { data: created, error: insErr } = await db
+      .from("clients")
+      .insert({
+        name: cfg.name,
+        ig_user_id: cfg.igUserId || null,
+        active: true,
+      })
+      .select("id")
+      .single();
+    if (insErr) throw new Error(`clients作成エラー: ${insErr.message}`);
+    clientId = created.id;
   }
 
-  await sheet.addRow({
-    date: new Date().toISOString().slice(0, 10),
-    period: args.period ?? "",
-    client: cfg.name,
-    summary: args.summaryText,
-    next_action: args.nextAction,
-    kpi_json: JSON.stringify(args.kpiData),
-  });
+  // 同月の行があれば上書き(再分析→再公開できるように)
+  const { data: row, error: upErr } = await db
+    .from("reports")
+    .upsert(
+      {
+        client_id: clientId,
+        period,
+        report_json: report,
+        status: "published",
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "client_id,period" }
+    )
+    .select("access_token")
+    .single();
+  if (upErr) throw new Error(`reports保存エラー: ${upErr.message}`);
 
-  return { spreadsheetTitle: doc.title, sheetTitle: sheet.title };
+  const base = process.env.APP_URL ?? "http://localhost:3000";
+  return `${base}/reports/${row.access_token}`;
 }
 
 // ---------------------------------------------------------------------------
 // MCPサーバー本体
 // ---------------------------------------------------------------------------
 
-const server = new McpServer({ name: "instagram-report", version: "0.1.0" });
+const server = new McpServer({ name: "instagram-report", version: "0.2.0" });
 
 server.registerTool(
   "get_instagram_insights",
@@ -242,7 +283,7 @@ server.registerTool(
       period: z
         .string()
         .regex(/^\d{4}-\d{2}$/)
-        .describe('対象月。"YYYY-MM" 形式 (例: "2026-06")'),
+        .describe('対象月。"YYYY-MM" 形式 (例: "2026-07")'),
     },
   },
   async ({ clientId, period }) => {
@@ -252,56 +293,39 @@ server.registerTool(
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
     } catch (e) {
-      return {
-        content: [{ type: "text", text: String(e) }],
-        isError: true,
-      };
+      return { content: [{ type: "text", text: String(e) }], isError: true };
     }
   }
 );
 
 server.registerTool(
-  "export_report",
+  "publish_report",
   {
-    title: "レポートをスプレッドシートへ転記",
+    title: "レポートを公開(専用URL発行)",
     description:
-      "分析済みの月次レポート(総括・次月の打ち手・主要KPI)を、クライアントに紐づいたGoogleスプレッドシートに1行追記する。",
+      "分析済みの月次レポートJSONをデータベースに保存し、クライアント納品用の専用URL(HTMLレポート。ブラウザ印刷でPDF化可)を発行する。同じ月を再公開すると上書きされる。",
     inputSchema: {
       clientId: z
         .string()
         .describe("clients.json に登録したクライアントのキー"),
-      period: z
-        .string()
-        .regex(/^\d{4}-\d{2}$/)
-        .optional()
-        .describe('レポート対象月 "YYYY-MM"'),
-      summaryText: z.string().describe("当月の総括(クライアント提出用の文章)"),
-      nextAction: z.string().describe("次月の打ち手(箇条書き可)"),
-      kpiData: z
-        .record(z.union([z.string(), z.number()]))
-        .describe('主要KPI。例: {"リーチ数": 45200, "フォロワー数": 8340}'),
+      report: ReportSchema.describe("レポート本体"),
     },
   },
-  async ({ clientId, period, summaryText, nextAction, kpiData }) => {
+  async ({ clientId, report }) => {
     try {
       const cfg = getClient(clientId);
-      const result = await appendReportRow(cfg, {
-        period,
-        summaryText,
-        nextAction,
-        kpiData,
-      });
+      const url = await publishReport(cfg, report.period, report);
       return {
         content: [
           {
             type: "text",
-            text: `転記に成功しました: 「${result.spreadsheetTitle}」の「${result.sheetTitle}」シートに1行追加`,
+            text: `レポートを公開しました。\n閲覧URL: ${url}\n(ページ右上の「PDFで保存 / 印刷」からPDF化できます)`,
           },
         ],
       };
     } catch (e) {
       return {
-        content: [{ type: "text", text: `転記に失敗しました: ${String(e)}` }],
+        content: [{ type: "text", text: `公開に失敗しました: ${String(e)}` }],
         isError: true,
       };
     }

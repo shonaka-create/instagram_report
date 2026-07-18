@@ -1,8 +1,12 @@
 {
-  "sample": {
-    "name": "株式会社サンプル",
+  "akane": {
+    "name": "AKANE WEB STUDIO",
     "igUserId": "17841400000000000",
-    "igAccessToken": "EAAG...(長期アクセストークン)",
-    "spreadsheetId": "1AbCdEfGhIjKlMnOpQrStUvWxYz(スプレッドシートURLの/d/と/editの間)"
+    "igAccessToken": "EAAG...(長期アクセストークン)"
+  },
+  "dreamin": {
+    "name": "Dreamin' ヘッドスパ&スカルプチャー",
+    "igUserId": "",
+    "igAccessToken": ""
   }
 }
