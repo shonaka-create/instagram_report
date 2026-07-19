@@ -25,12 +25,13 @@ function StageRow({ stage }: { stage: StageView }) {
             {v.label}
           </span>
         </div>
-        <div className="text-right tabular-nums">
+        <div className="flex items-center gap-2 tabular-nums">
           <span className={`text-lg font-bold ${v.text}`}>
             {stage.value === null ? "—" : `${stage.value}%`}
           </span>
-          <span className="ml-2 text-xs text-slate-400">
-            合格ライン {stage.benchmark}%
+          <span className="inline-flex items-baseline gap-1 rounded-md border border-slate-300 bg-slate-100 px-2 py-0.5 text-slate-700">
+            <span className="text-[11px] font-semibold tracking-wide">合格ライン</span>
+            <span className="text-sm font-bold">{stage.benchmark}%</span>
           </span>
         </div>
       </div>
@@ -42,7 +43,7 @@ function StageRow({ stage }: { stage: StageView }) {
           style={{ width: `${ratio}%` }}
         />
         <div
-          className="absolute top-0 h-full w-px bg-slate-400"
+          className="absolute -top-0.5 h-3 w-0.5 bg-slate-500"
           style={{ left: `${100 / 1.3}%` }}
           aria-hidden
         />
