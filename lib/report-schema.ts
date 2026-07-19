@@ -52,6 +52,8 @@ export const MetricsSchema = z.object({
         benchmark: z.number(),
         gapPt: z.number().nullable(),
         verdict: z.enum(["pass", "warn", "fail", "unknown"]),
+        // 旧レポートには無いので optional。ありえない値のときのみ文字列が入る
+        caveat: z.string().nullish(),
       })
     ),
     raw: z.record(z.string(), z.number().nullable()),

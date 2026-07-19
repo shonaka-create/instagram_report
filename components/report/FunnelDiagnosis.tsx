@@ -10,9 +10,9 @@ const VERDICT = {
 
 function StageRow({ stage }: { stage: StageView }) {
   const v = VERDICT[stage.verdict];
-  // バーは合格ライン=100%地点として実測値の到達度を描く(未達がどれだけ遠いか可視化)
+  // バーが満杯=合格ライン到達。未達は合格ラインまでの到達度(実測÷合格ライン)を示す。
   const ratio =
-    stage.value === null ? 0 : Math.min((stage.value / stage.benchmark) * 100, 130);
+    stage.value === null ? 0 : Math.min((stage.value / stage.benchmark) * 100, 100);
 
   return (
     <div className="print:break-inside-avoid">
@@ -36,18 +36,19 @@ function StageRow({ stage }: { stage: StageView }) {
         </div>
       </div>
 
-      {/* 合格ラインを基準線としたバー */}
-      <div className="relative mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+      {/* バーが満杯=合格ライン到達 */}
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
         <div
           className={`h-full rounded-full ${v.bar}`}
           style={{ width: `${ratio}%` }}
         />
-        <div
-          className="absolute -top-0.5 h-3 w-0.5 bg-slate-500"
-          style={{ left: `${100 / 1.3}%` }}
-          aria-hidden
-        />
       </div>
+
+      {stage.caveat && (
+        <p className="mt-2 rounded-md bg-amber-50 px-2.5 py-1.5 text-xs leading-relaxed text-amber-700">
+          {stage.caveat}
+        </p>
+      )}
 
       <p className="mt-2 text-sm leading-relaxed text-slate-600">
         {stage.diagnosis}

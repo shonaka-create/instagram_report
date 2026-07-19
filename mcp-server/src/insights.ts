@@ -335,6 +335,7 @@ export type FunnelStageMetric = {
   benchmark: number; // %
   gapPt: number | null; // value - benchmark (合格ラインまでの差、モデルが再計算しないよう提供)
   verdict: Verdict;
+  caveat: string | null; // 数値がありえない値(100%超・負)のときだけ妥当性の一言。通常はnull
 };
 
 export type KpiItem = {
@@ -377,6 +378,22 @@ function verdictFor(value: number | null, benchmark: number): Verdict {
   if (value >= benchmark) return "pass";
   if (value >= benchmark * 0.75) return "warn";
   return "fail";
+}
+
+// ありえない値(比率が100%超・負)のときだけ、その数値の妥当性を一言で返す。
+// 通常の範囲なら null(注記を出さない)。母数が小さい月ほど比率は跳ねやすい。
+function stageCaveat(key: FunnelKey, value: number | null): string | null {
+  if (value === null) return null;
+  if (value > 100) {
+    if (key === "profile_transition_rate")
+      return "参考値: プロフィール閲覧は検索・発見タブなど投稿以外からの流入や複数回訪問も含むため、リーチを上回り100%を超えることがあります。母数が小さいほど振れるため、確定値ではなく傾向として見てください。";
+    if (key === "save_rate" || key === "home_rate")
+      return "参考値: 母数が小さく比率が100%を超えています。数値が跳ねやすい状態のため、傾向として見てください。";
+    return "参考値: 母数が小さく100%を超えています。傾向として見てください。";
+  }
+  if (value < 0)
+    return "参考値: マイナスは純減(フォロー解除が新規獲得を上回った)を意味します。";
+  return null;
 }
 
 export function computeMetrics(
@@ -429,6 +446,7 @@ export function computeMetrics(
       benchmark,
       gapPt: value === null ? null : Math.round((value - benchmark) * 10) / 10,
       verdict: verdictFor(value, benchmark),
+      caveat: stageCaveat(key, value),
     };
   });
 
@@ -569,8 +587,14 @@ export function buildAnalysisGuidelines(metrics: Metrics): string {
     "- 数値の読み上げ禁止。必ず『なぜこの水準か』を閲覧者心理(自己開示への返報性、保存の動機、単純接触効果)とアルゴリズム(初速シグナル、滞在時間、保存・シェアの重み、フィード=フォロワー内配信/リール=非フォロワー配信の構造差)で説明する",
     "- topPosts の insight は 観察→因果(心理/アルゴリズム)→次の一手 の3要素。winPattern は保存率トップの『なぜ後で見返したくなったか(テーマ・切り口・ターゲットの悩み)』を再現可能な勝ちパターンとして言語化する",
     "- worstPosts の insight は原因の仮説と改善案(批評で終わらせない)",
-    "- nextActions は3〜5個。ボトルネック直撃の施策を priority:high に。最低1つは『やめること(リソースの引き上げ)』を含め、各施策に why を添える",
-    "- 禁止表現: 「頑張りましょう」「引き続き注視」「〜と思われます の多用」などの逃げ口上。クライアント提出用の丁寧語で歯切れよく断定する",
+    "- nextActions は3〜5個。ボトルネック直撃の施策を priority:high に。最低1つは「やめること(リソースの引き上げ)」を含め、各施策に why を添える",
+    "",
+    "== 文体(AIっぽさを消す。実在の戦略コンサル/SNSマーケターとして) ==",
+    "- 主語述語を短く、事実→原因→打ち手の順で言い切る。1文を長くしない",
+    "- 使用禁止の常套句・AIっぽい表現: 「追い風」「崩さず活かす」「〜していきましょう」「引き続き注視」「〜と思われます」「本数の谷」等の凝った比喩、「頑張りましょう」、過度なポジティブ締め",
+    "- 鉤括弧『』での強調は使わない(必要な固有名詞は「」でよいが多用しない)",
+    "- 抽象比喩より具体語。例: ×『本数の谷を作らない』→ ○『1投稿ずつ日を分ける』",
+    "- 逃げ口上・両論併記で締めない。断定して責任を持つ。ただし unknown 指標は測定不可と明記する",
     "",
     ...(moduleLines.length > 0
       ? ["== このクライアントの追加観点(additionalSections に各1セクション書く) ==", ...moduleLines, ""]
